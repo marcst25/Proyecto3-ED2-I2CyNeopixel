@@ -1,0 +1,164 @@
+//******************************************/
+// Universidad del Valle de Guatemala
+// BE3029 - Electronica Digital 2
+// Abby Barrios y Marcela Castañeda
+// Noviembre 2025
+// Proyecto 3
+// MCU: ESP32 dev kit 1.0
+//******************************************/
+
+//******************************************/
+// Librerias
+//******************************************/
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_NeoPixel.h>
+
+//******************************************/
+// Definiciones
+//******************************************/
+//I2C
+#define SDA_PIN 21
+#define SCL_PIN 22
+#define TCS_ADDR 0x29
+
+//Sensor
+#define CMD_BIT 0x80
+#define CMD_AUTO_INC 0x20 
+#define REG_ENABLE 0x00
+#define REG_ATIME 0x01
+#define REG_CONTROL 0x0F
+#define REG_STATUS 0x13
+#define REG_CDATA_L 0x14
+
+//Neopixel
+#define NEOPIXEL_PIN 4
+#define NUMPIXELS 8
+Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+//UART
+static const int UART1_TX = 17; 
+static const int UART1_RX = 16;
+HardwareSerial Link(1); // Serial1
+
+//******************************************/
+//Funciones principales
+//******************************************/
+//Funciones del sensor de color
+void writeRegister(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(TCS_ADDR);
+  Wire.write(CMD_BIT | reg);
+  Wire.write(value);
+  Wire.endTransmission();
+}
+
+uint8_t readRegister(uint8_t reg) {
+  Wire.beginTransmission(TCS_ADDR);
+  Wire.write(CMD_BIT | reg);
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)TCS_ADDR, (uint8_t)1);
+  if (Wire.available()) return Wire.read();
+  return 0;
+}
+
+void readMulti(uint8_t startReg, uint8_t *buf, uint8_t len) {
+  Wire.beginTransmission(TCS_ADDR);
+  Wire.write(CMD_BIT | CMD_AUTO_INC | startReg);
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint8_t)TCS_ADDR, len);
+  for (uint8_t i = 0; i < len && Wire.available(); i++) {
+    buf[i] = Wire.read();
+  }
+}
+
+void wait_for_data_ready() {
+  while (!(readRegister(REG_STATUS) & 0x01)) {
+    delay(5);
+  }
+}
+
+void tcs3472_init() {
+  writeRegister(REG_ATIME, 0xEB); // 50ms integración
+  writeRegister(REG_CONTROL, 0x01); // Ganancia 4x
+  writeRegister(REG_ENABLE, 0x01);
+  delay(3);
+  writeRegister(REG_ENABLE, 0x03);
+}
+
+void i2cScan() {
+  Serial.println("Escaneando I2C...");
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Dispositivo I2C encontrado en 0x");
+      Serial.println(addr, HEX);
+    }
+  }
+}
+
+//Cambio de color de Neopixel según el estado
+void setNeoColor(String estado) {
+  uint32_t color;
+  if (estado == "inicio")           color = pixels.Color(0, 255, 217); //Cian
+  else if (estado == "midiendo")    color = pixels.Color(255, 170, 0); // Amarillo
+  else if (estado == "transmitiendo") color = pixels.Color(0, 255, 0); // Verde
+  else if (estado == "guardando")   color = pixels.Color(183, 0, 255);//Fucsia
+  else                              color = pixels.Color(0, 0, 0);// Apagado
+
+  pixels.setPixelColor(0, color);
+  pixels.show();
+}
+
+//******************************************/
+// Configuracion
+//******************************************/
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  pixels.begin();
+  setNeoColor("inicio");
+
+  Serial.println("\nESP32 + TCS3472");
+  i2cScan();
+  tcs3472_init();
+  Serial.println("TCS3472 configurado.");
+
+  Link.begin(115200, SERIAL_8N1, UART1_RX, UART1_TX);
+  Serial.println("UART1 hacia STM32 inicializado.");
+}
+
+//******************************************/
+// Loop Principal
+//******************************************/
+void loop() {
+  if (Link.available()) {
+    String cmd = Link.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "READ") {
+      setNeoColor("midiendo");
+      wait_for_data_ready();
+      delay(1000); 
+
+      uint8_t data[8];
+      readMulti(REG_CDATA_L, data, 8);
+
+      uint16_t c = (data[1] << 8) | data[0];
+      uint16_t r = (data[3] << 8) | data[2];
+      uint16_t g = (data[5] << 8) | data[4];
+      uint16_t b = (data[7] << 8) | data[6];
+
+      setNeoColor("transmitiendo");
+      Link.printf("[READ] C=%u  R=%u  G=%u  B=%u\r\n", c, r, g, b);
+      Serial.printf("[READ] C=%u  R=%u  G=%u  B=%u\n", c, r, g, b);
+      delay(1000); 
+
+      setNeoColor("guardando");
+      delay(1000);
+
+      setNeoColor("inicio");
+    }
+  }
+}
